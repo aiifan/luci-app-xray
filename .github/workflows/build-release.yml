@@ -33,14 +33,17 @@ jobs:
 
       - name: Prepare feeds, golang and packages
         run: |
-          # opkg 体系（产出 ipk），匹配现有固件；25.12 默认 USE_APK=y 需显式关闭
-          sed -i '/^CONFIG_USE_APK=/d; /^# CONFIG_USE_APK/d' sdk/.config
-          echo '# CONFIG_USE_APK is not set' >> sdk/.config
+          # 注意：25.12 SDK tarball 内无预生成 .config，USE_APK 的改写必须在
+          # make defconfig 生成 .config 之后进行（见 Build 步骤）
           ./sdk/scripts/feeds update -a
           # Xray-core 26.9.30 要求 go 1.27，golang-package.mk 强制 GOTOOLCHAIN=local，
-          # 25.12 官方 feed 的 golang 版本不保证满足，统一替换为 sbwml 27.x（go 1.27.2）
+          # 官方 25.12 feed 的 golang 版本不保证满足，统一替换为 sbwml 27.x（go 1.27.2）
           rm -rf sdk/feeds/packages/lang/golang
           git clone --depth 1 -b 27.x https://github.com/sbwml/packages_lang_golang sdk/feeds/packages/lang/golang
+          # 移除官方 feed 的同名包：真名包 xray-core 会被 DEPENDS 优先 select，
+          # 必须让位给 yichya openwrt-xray（PROVIDES xray-core）
+          rm -rf sdk/feeds/packages/net/xray-core
+          rm -rf sdk/feeds/packages/net/v2ray-geodata
           ./sdk/scripts/feeds install -a
           # 本仓库（core/geodata/status 三包）+ xray 核心提供者 + geodata 数据包
           ln -s "$GITHUB_WORKSPACE" sdk/package/luci-app-xray
@@ -55,7 +58,11 @@ jobs:
       - name: Build packages
         run: |
           cd sdk
+          # 生成 .config（tarball 未附带）
           make defconfig
+          # opkg 体系（产出 ipk），匹配现有固件；25.12 默认 USE_APK=y 需显式关闭
+          sed -i '/^CONFIG_USE_APK=/d; /^# CONFIG_USE_APK/d' .config
+          echo '# CONFIG_USE_APK is not set' >> .config
           for p in luci-app-xray luci-app-xray-status luci-app-xray-geodata openwrt-xray v2ray-geoip v2ray-geosite; do
             sed -i "s/^# CONFIG_PACKAGE_${p} is not set/CONFIG_PACKAGE_${p}=y/" .config
             grep -q "^CONFIG_PACKAGE_${p}=y" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
@@ -70,6 +77,11 @@ jobs:
           mkdir -p dist
           find sdk/bin/packages -type f -name "*.ipk" -exec cp {} dist/ \;
           ls -lh dist/
+          if [ "$(find dist -type f -name '*.ipk' | wc -l)" -eq 0 ]; then
+            echo "::error::No ipk produced — check whether USE_APK was really disabled in Build step"
+            find sdk/bin -type f | head -50
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
